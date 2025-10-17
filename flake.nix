@@ -29,7 +29,10 @@
 
             # System dependencies
             alsa-lib
+            alsa-lib.dev
             pkg-config
+            openssl
+            udev
           ];
 
           # Environment variables for Rust
