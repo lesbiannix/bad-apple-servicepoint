@@ -4,7 +4,7 @@ mod theme;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetSize},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use image::{DynamicImage, GenericImageView};
 use ratatui::{
@@ -18,7 +18,7 @@ use rodio::{Decoder, OutputStream, Sink};
 use servicepoint::{Bitmap, BitmapCommand, CompressionCode, GridMut, Origin, UdpSocketExt};
 use std::{
     error::Error,
-    fs::File,
+    fs::{self, File},
     io::{self, BufReader},
     net::UdpSocket,
     time::{Duration, Instant},
@@ -29,12 +29,11 @@ use crate::config::{load_settings, save_settings, Settings};
 
 const FRAME_RATE: f64 = 30.0;
 const SERVICEPOINT_ENABLED: bool = true;
-const SERVICEPOINT_ADDR: &str = "127.0.0.1:4242";
+const SERVICEPOINT_ADDR: &str = "127.0.0.1:2342";
 
 struct AppState {
     playing: bool,
     settings: Settings,
-    is_fullscreen: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -65,7 +64,6 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>) -> Result<()
     let mut app_state = AppState {
         playing: true,
         settings: load_settings(),
-        is_fullscreen: false,
     };
     let themes = Theme::default_themes();
     let mut current_theme = themes.get(&app_state.settings.theme).unwrap_or_else(|| themes.get("default").unwrap());
@@ -95,9 +93,17 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>) -> Result<()
         s.play();
     }
 
-    let frame_paths: Vec<_> = (1..=6572) // Assuming all frames are available
-        .map(|i| format!("assets/frames/frame_{:04}.png", i))
+    let frame_paths: Vec<_> = fs::read_dir("assets/frames")
+        .map_err(|e| format!("Failed to read frames directory: {}", e))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
         .collect();
+
+    if frame_paths.is_empty() {
+        return Err("No frames found in assets/frames directory.".into());
+    }
+
     let frames: Vec<DynamicImage> = frame_paths
         .into_iter()
         .map(|path| image::open(path).expect("Failed to load frame"))
@@ -126,7 +132,6 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>) -> Result<()
 
         if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key) = event::read()? {
-                let mut settings_changed = true;
                 match key.code {
                     KeyCode::Char('q') => {
                         save_settings(&app_state.settings);
@@ -137,7 +142,6 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>) -> Result<()
                         if let Some(s) = &sink {
                             if app_state.playing { s.play(); } else { s.pause(); }
                         }
-                        settings_changed = false;
                     }
                     KeyCode::Up => app_state.settings.volume = (app_state.settings.volume + 0.1).min(1.0),
                     KeyCode::Down => app_state.settings.volume = (app_state.settings.volume - 0.1).max(0.0),
@@ -147,23 +151,12 @@ fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>) -> Result<()
                         let theme_names: Vec<_> = themes.keys().cloned().collect();
                         let current_theme_index = theme_names.iter().position(|r| r == &current_theme.name).unwrap_or(0);
                         let next_theme_index = (current_theme_index + 1) % theme_names.len();
-                        app_state.settings.theme = theme_names[next_theme_index].clone();
-                        current_theme = themes.get(&app_state.settings.theme).unwrap();
+                        let next_theme_name = theme_names[next_theme_index].clone();
+                        app_state.settings.theme = next_theme_name.clone();
+                        current_theme = themes.get(&next_theme_name).unwrap_or_else(|| themes.get("default").unwrap());
                     }
-                    KeyCode::F(11) => {
-                        app_state.is_fullscreen = !app_state.is_fullscreen;
-                        if app_state.is_fullscreen {
-                            execute!(terminal.backend_mut(), SetSize(u16::MAX, u16::MAX))?;
-                        } else {
-                            execute!(terminal.backend_mut(), SetSize(80, 24))?;
-                        }
-                    }
-                    _ => settings_changed = false,
+                    _ => {}
                 }
-                if settings_changed {
-                    save_settings(&app_state.settings);
-                }
-
                 if let Some(s) = &sink {
                     s.set_volume(app_state.settings.volume);
                     s.set_speed(app_state.settings.speed as f32);
@@ -184,7 +177,7 @@ fn ui(f: &mut Frame, img: &DynamicImage, app_state: &AppState, theme: &Theme) {
     f.render_widget(image_paragraph, chunks[0]);
 
     let status_text = format!(
-        "{} | Speed: {:.1}x | Volume: {:.0}% | Theme: {} | Controls: [Space] Play/Pause, [↑/↓] Volume, [←/→] Speed, [t] Theme, [F11] Fullscreen, [q] Quit",
+        "{} | Speed: {:.1}x | Volume: {:.0}% | Theme: {} | Controls: [Space] Play/Pause, [↑/↓] Volume, [←/→] Speed, [t] Theme, [q] Quit",
         if app_state.playing { "▶ Playing" } else { "⏸ Paused" },
         app_state.settings.speed,
         app_state.settings.volume * 100.0,
