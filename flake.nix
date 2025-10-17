@@ -25,6 +25,7 @@
               "clippy"
               "rustc"
               "rustfmt"
+              "rust-src"
             ]))
 
             # System dependencies
@@ -34,9 +35,6 @@
             openssl
             udev
           ];
-
-          # Environment variables for Rust
-          RUST_SRC_PATH = rust-bin.stable.latest.default.rust-src;
         };
       }
     );

@@ -19,29 +19,32 @@ impl Default for Settings {
     }
 }
 
-fn get_config_path() -> PathBuf {
-    let mut path = dirs::config_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push("bad-apple-player");
-    path.push("config.json");
-    path
+fn get_config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|mut path| {
+        path.push("bad-apple-player");
+        path.push("config.json");
+        path
+    })
 }
 
 pub fn load_settings() -> Settings {
-    let path = get_config_path();
-    if let Ok(data) = fs::read_to_string(path) {
-        if let Ok(settings) = serde_json::from_str(&data) {
-            return settings;
+    if let Some(path) = get_config_path() {
+        if let Ok(data) = fs::read_to_string(path) {
+            if let Ok(settings) = serde_json::from_str(&data) {
+                return settings;
+            }
         }
     }
     Settings::default()
 }
 
 pub fn save_settings(settings: &Settings) {
-    let path = get_config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).ok();
-    }
-    if let Ok(data) = serde_json::to_string_pretty(settings) {
-        fs::write(path, data).ok();
+    if let Some(path) = get_config_path() {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        if let Ok(data) = serde_json::to_string_pretty(settings) {
+            fs::write(path, data).ok();
+        }
     }
 }
