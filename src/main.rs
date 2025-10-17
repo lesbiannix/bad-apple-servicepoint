@@ -1,13 +1,15 @@
+mod config;
+mod theme;
+
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetSize},
 };
 use image::{DynamicImage, GenericImageView};
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
     Frame, Terminal,
@@ -21,6 +23,9 @@ use std::{
     net::UdpSocket,
     time::{Duration, Instant},
 };
+use theme::Theme;
+
+use crate::config::{load_settings, save_settings, Settings};
 
 const FRAME_RATE: f64 = 30.0;
 const SERVICEPOINT_ENABLED: bool = true;
@@ -28,18 +33,8 @@ const SERVICEPOINT_ADDR: &str = "127.0.0.1:4242";
 
 struct AppState {
     playing: bool,
-    speed: f64,
-    volume: f32,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self {
-            playing: true,
-            speed: 1.0,
-            volume: 1.0,
-        }
-    }
+    settings: Settings,
+    is_fullscreen: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -66,8 +61,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> {
-    let mut app_state = AppState::default();
+fn run_app<B: Backend + std::io::Write>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>> {
+    let mut app_state = AppState {
+        playing: true,
+        settings: load_settings(),
+        is_fullscreen: false,
+    };
+    let themes = Theme::default_themes();
+    let mut current_theme = themes.get(&app_state.settings.theme).unwrap_or_else(|| themes.get("default").unwrap());
 
     let sp_socket = if SERVICEPOINT_ENABLED {
         UdpSocket::bind_connect(SERVICEPOINT_ADDR).ok()
@@ -90,11 +91,11 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>>
                 s.append(source);
             }
         }
-        s.set_volume(app_state.volume);
+        s.set_volume(app_state.settings.volume);
         s.play();
     }
 
-    let frame_paths: Vec<_> = (1..=2)
+    let frame_paths: Vec<_> = (1..=6572) // Assuming all frames are available
         .map(|i| format!("assets/frames/frame_{:04}.png", i))
         .collect();
     let frames: Vec<DynamicImage> = frame_paths
@@ -106,8 +107,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>>
     let mut last_frame_time = Instant::now();
 
     loop {
-        let frame_duration = Duration::from_secs_f64(1.0 / (FRAME_RATE * app_state.speed));
-        terminal.draw(|f| ui(f, &frames[frame_index], &app_state))?;
+        let frame_duration = Duration::from_secs_f64(1.0 / (FRAME_RATE * app_state.settings.speed));
+        terminal.draw(|f| ui(f, &frames[frame_index], &app_state, &current_theme))?;
 
         if let Some(socket) = &sp_socket {
             let command = image_to_bitmap_command(&frames[frame_index]);
@@ -125,23 +126,47 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>>
 
         if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key) = event::read()? {
+                let mut settings_changed = true;
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') => {
+                        save_settings(&app_state.settings);
+                        break;
+                    }
                     KeyCode::Char(' ') => {
                         app_state.playing = !app_state.playing;
                         if let Some(s) = &sink {
                             if app_state.playing { s.play(); } else { s.pause(); }
                         }
+                        settings_changed = false;
                     }
-                    KeyCode::Up => app_state.volume = (app_state.volume + 0.1).min(1.0),
-                    KeyCode::Down => app_state.volume = (app_state.volume - 0.1).max(0.0),
-                    KeyCode::Left => app_state.speed = (app_state.speed - 0.1).max(0.1),
-                    KeyCode::Right => app_state.speed = (app_state.speed + 0.1).min(2.0),
-                    _ => {}
+                    KeyCode::Up => app_state.settings.volume = (app_state.settings.volume + 0.1).min(1.0),
+                    KeyCode::Down => app_state.settings.volume = (app_state.settings.volume - 0.1).max(0.0),
+                    KeyCode::Left => app_state.settings.speed = (app_state.settings.speed - 0.1).max(0.1),
+                    KeyCode::Right => app_state.settings.speed = (app_state.settings.speed + 0.1).min(2.0),
+                    KeyCode::Char('t') => {
+                        let theme_names: Vec<_> = themes.keys().cloned().collect();
+                        let current_theme_index = theme_names.iter().position(|r| r == &current_theme.name).unwrap_or(0);
+                        let next_theme_index = (current_theme_index + 1) % theme_names.len();
+                        app_state.settings.theme = theme_names[next_theme_index].clone();
+                        current_theme = themes.get(&app_state.settings.theme).unwrap();
+                    }
+                    KeyCode::F(11) => {
+                        app_state.is_fullscreen = !app_state.is_fullscreen;
+                        if app_state.is_fullscreen {
+                            execute!(terminal.backend_mut(), SetSize(u16::MAX, u16::MAX))?;
+                        } else {
+                            execute!(terminal.backend_mut(), SetSize(80, 24))?;
+                        }
+                    }
+                    _ => settings_changed = false,
                 }
+                if settings_changed {
+                    save_settings(&app_state.settings);
+                }
+
                 if let Some(s) = &sink {
-                    s.set_volume(app_state.volume);
-                    s.set_speed(app_state.speed as f32);
+                    s.set_volume(app_state.settings.volume);
+                    s.set_speed(app_state.settings.speed as f32);
                 }
             }
         }
@@ -149,23 +174,24 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-fn ui(f: &mut Frame, img: &DynamicImage, app_state: &AppState) {
+fn ui(f: &mut Frame, img: &DynamicImage, app_state: &AppState, theme: &Theme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)].as_ref())
         .split(f.size());
 
-    let image_paragraph = render_image_to_paragraph(img, chunks[0]);
+    let image_paragraph = render_image_to_paragraph(img, chunks[0], theme);
     f.render_widget(image_paragraph, chunks[0]);
 
     let status_text = format!(
-        "{} | Speed: {:.1}x | Volume: {:.0}% | Controls: [Space] Play/Pause, [↑/↓] Volume, [←/→] Speed, [q] Quit",
+        "{} | Speed: {:.1}x | Volume: {:.0}% | Theme: {} | Controls: [Space] Play/Pause, [↑/↓] Volume, [←/→] Speed, [t] Theme, [F11] Fullscreen, [q] Quit",
         if app_state.playing { "▶ Playing" } else { "⏸ Paused" },
-        app_state.speed,
-        app_state.volume * 100.0,
+        app_state.settings.speed,
+        app_state.settings.volume * 100.0,
+        theme.name
     );
     let status_line = Paragraph::new(Line::from(status_text))
-        .style(Style::default().add_modifier(Modifier::REVERSED));
+        .style(theme.status_bar);
     f.render_widget(status_line, chunks[1]);
 }
 
@@ -190,7 +216,7 @@ fn image_to_bitmap_command(img: &DynamicImage) -> BitmapCommand {
     }
 }
 
-fn render_image_to_paragraph<'a>(img: &'a DynamicImage, area: Rect) -> Paragraph<'a> {
+fn render_image_to_paragraph<'a>(img: &'a DynamicImage, area: Rect, theme: &Theme) -> Paragraph<'a> {
     let mut lines = Vec::with_capacity(area.height as usize);
     let scale_x = img.width() as f32 / area.width as f32;
     let scale_y = img.height() as f32 / area.height as f32;
@@ -203,17 +229,9 @@ fn render_image_to_paragraph<'a>(img: &'a DynamicImage, area: Rect) -> Paragraph
 
             let pixel = img.get_pixel(img_x.min(img.width() - 1), img_y.min(img.height() - 1));
             let luma = pixel[0] / 3 + pixel[1] / 3 + pixel[2] / 3;
-            let character = match luma {
-                0..=32 => " ",
-                33..=64 => ".",
-                65..=96 => ":",
-                97..=128 => "-",
-                129..=160 => "=",
-                161..=192 => "+",
-                193..=224 => "*",
-                _ => "#",
-            };
-            spans.push(Span::styled(character, Style::default()));
+            let char_index = (luma as usize * (theme.video.characters.len() - 1)) / 255;
+            let character = theme.video.characters[char_index].to_string();
+            spans.push(Span::styled(character, theme.video.style));
         }
         lines.push(Line::from(spans));
     }
